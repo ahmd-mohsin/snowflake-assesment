@@ -64,23 +64,34 @@ class SnowflakeClient:
 
     @contextmanager
     def cursor(self) -> Iterator[Any]:
-        """Yield a dict cursor. Reconnects once on transient failure."""
+        """Yield a dict cursor, auto-reconnecting once if the connection is dead.
+
+        SQL errors (ProgrammingError) propagate to the caller — only real
+        connection failures trigger a reconnect. This avoids the
+        "generator didn't stop after throw()" bug where retrying mid-yield
+        confuses the context manager protocol.
+        """
         conn = self._get_conn()
+        # Proactive liveness check — cheap (~10ms) and catches stale connections
+        # before we hand out a cursor.
         try:
-            cur = conn.cursor(DictCursor)
+            probe = conn.cursor()
             try:
-                yield cur
+                probe.execute("SELECT 1")
+                probe.fetchone()
             finally:
-                cur.close()
+                probe.close()
         except (OperationalError, DatabaseError) as e:
-            logger.warning("Snowflake connection error, retrying once: %s", e)
+            logger.warning("Stale connection detected, reconnecting: %s", e)
             with self._conn_lock:
                 self._conn = self._connect()
-            cur = self._conn.cursor(DictCursor)
-            try:
-                yield cur
-            finally:
-                cur.close()
+                conn = self._conn
+
+        cur = conn.cursor(DictCursor)
+        try:
+            yield cur
+        finally:
+            cur.close()
 
     def close(self) -> None:
         with self._conn_lock:

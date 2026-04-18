@@ -1,9 +1,14 @@
 """Configuration loaded from environment variables."""
 import os
 from dataclasses import dataclass
+from pathlib import Path
+
 from dotenv import load_dotenv
 
-load_dotenv()
+# Resolve from CWD (e.g. repo root when running smoke_test.py) and beside this file (module_1/.env).
+_config_dir = Path(__file__).resolve().parent
+load_dotenv(_config_dir / ".env")
+load_dotenv(Path.cwd() / ".env", override=True)
 
 
 @dataclass(frozen=True)

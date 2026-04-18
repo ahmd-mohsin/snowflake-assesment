@@ -45,6 +45,11 @@ class TestValidate:
         sql = "WITH x AS (SELECT 1) SELECT * FROM x"
         assert executor.validate(sql) == sql
 
+    def test_allows_quoted_digit_prefix_tables(self, executor):
+        # Census tables start with digits and must be double-quoted
+        sql = 'SELECT B01001e1 FROM "2019_CBG_B01" LIMIT 10'
+        assert executor.validate(sql) == sql
+
     def test_strips_trailing_semicolon(self, executor):
         assert executor.validate("SELECT 1;") == "SELECT 1"
 

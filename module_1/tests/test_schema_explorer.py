@@ -1,10 +1,10 @@
-"""Tests for SchemaExplorer using a mocked Snowflake cursor."""
+"""Tests for SchemaExplorer and FieldDescription."""
 from contextlib import contextmanager
 from unittest.mock import MagicMock
 
 import pytest
 
-from module_1.schema_explorer import SchemaExplorer
+from module_1.schema_explorer import SchemaExplorer, FieldDescription
 from module_1.config import SnowflakeConfig
 
 
@@ -21,34 +21,98 @@ def config():
                            warehouse="x", role="x")
 
 
-def test_list_tables_parses_rows(config):
-    client = MagicMock()
-    client.config = config
-    client.cursor.return_value = fake_cursor([
-        {"TABLE_NAME": "CBG_B01001", "ROW_COUNT": 220000, "COMMENT": "Sex by age"},
-        {"TABLE_NAME": "CBG_B19013", "ROW_COUNT": 220000, "COMMENT": ""},
-    ])
+class TestFieldDescription:
+    def test_data_table_name_from_B_prefix(self):
+        f = FieldDescription(
+            column_name="B01001e10", table_number="B01001",
+            table_title="Sex By Age", table_topics="Age and Sex",
+            table_universe="Total population",
+            field_levels=["Estimate", "SEX BY AGE", "Total population", "Total",
+                          "Male", "22 to 24 years", "", "", "", ""],
+            year=2019,
+        )
+        assert f.data_table_name == "2019_CBG_B01"
 
-    explorer = SchemaExplorer(client)
-    tables = explorer.list_tables()
+    def test_data_table_name_from_C_prefix(self):
+        f = FieldDescription(
+            column_name="C02003e1", table_number="C02003",
+            table_title="t", table_topics="", table_universe="",
+            field_levels=[""] * 10, year=2020,
+        )
+        assert f.data_table_name == "2020_CBG_C02"
 
-    assert len(tables) == 2
-    assert tables[0].name == "CBG_B01001"
-    assert tables[0].description == "Sex by age"
-    assert tables[1].description == ""
+    def test_human_label_skips_empty_levels(self):
+        f = FieldDescription(
+            column_name="x", table_number="B01001", table_title="",
+            table_topics="", table_universe="",
+            field_levels=["Estimate", "", "Total", "", "Male",
+                          "22 to 24 years", "", "", "", ""],
+            year=2019,
+        )
+        assert f.human_label == "Estimate > Total > Male > 22 to 24 years"
+
+    def test_to_document_includes_meaning(self):
+        f = FieldDescription(
+            column_name="B01001e10", table_number="B01001",
+            table_title="Sex By Age", table_topics="Age and Sex",
+            table_universe="Total population",
+            field_levels=["Estimate", "SEX BY AGE", "Total population", "Total",
+                          "Male", "22 to 24 years", "", "", "", ""],
+            year=2019,
+        )
+        doc = f.to_document()
+        assert "2019" in doc
+        assert "Sex By Age" in doc
+        assert "Male" in doc
+        assert "22 to 24 years" in doc
+        assert "2019_CBG_B01" in doc
 
 
-def test_list_columns_parses_rows(config):
-    client = MagicMock()
-    client.config = config
-    client.cursor.return_value = fake_cursor([
-        {"TABLE_NAME": "T1", "COLUMN_NAME": "GEOID",
-         "DATA_TYPE": "VARCHAR", "COMMENT": "Census block group id"},
-    ])
+class TestLoadFieldDescriptions:
+    def test_parses_metadata_row(self, config):
+        client = MagicMock()
+        client.config = config
+        client.cursor.return_value = fake_cursor([{
+            "TABLE_ID": "B01001e10",
+            "TABLE_NUMBER": "B01001",
+            "TABLE_TITLE": "Sex By Age",
+            "TABLE_TOPICS": "Age and Sex",
+            "TABLE_UNIVERSE": "Total population",
+            "FIELD_LEVEL_1": "Estimate",
+            "FIELD_LEVEL_2": "SEX BY AGE",
+            "FIELD_LEVEL_3": "Total population",
+            "FIELD_LEVEL_4": "Total",
+            "FIELD_LEVEL_5": "Male",
+            "FIELD_LEVEL_6": "22 to 24 years",
+            "FIELD_LEVEL_7": None,
+            "FIELD_LEVEL_8": None,
+            "FIELD_LEVELl_9": None,   # typo preserved — matches source
+            "FIELD_LEVEL_10": None,
+        }])
 
-    explorer = SchemaExplorer(client)
-    cols = explorer.list_columns()
+        explorer = SchemaExplorer(client)
+        fields = explorer.load_field_descriptions(2019)
 
-    assert len(cols) == 1
-    assert cols[0].column_name == "GEOID"
-    assert "Census block group id" in cols[0].to_document()
+        assert len(fields) == 1
+        assert fields[0].column_name == "B01001e10"
+        assert fields[0].data_table_name == "2019_CBG_B01"
+        assert "Male" in fields[0].human_label
+
+    def test_handles_missing_levels_gracefully(self, config):
+        client = MagicMock()
+        client.config = config
+        client.cursor.return_value = fake_cursor([{
+            "TABLE_ID": "B01001e1",
+            "TABLE_NUMBER": "B01001",
+            "TABLE_TITLE": "Sex By Age",
+            "TABLE_TOPICS": "Age and Sex",
+            "TABLE_UNIVERSE": "Total population",
+            **{f"FIELD_LEVEL_{i}": None for i in [1, 2, 3, 4, 5, 6, 7, 8, 10]},
+            "FIELD_LEVELl_9": None,
+        }])
+
+        explorer = SchemaExplorer(client)
+        fields = explorer.load_field_descriptions(2019)
+
+        assert len(fields) == 1
+        assert fields[0].human_label == ""  # no levels populated, no crash

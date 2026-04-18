@@ -1,45 +1,75 @@
-"""Discover tables and columns in the Census dataset.
+"""Discover tables and fields in the Census dataset.
 
-The Snowflake Marketplace census share exposes metadata via INFORMATION_SCHEMA.
-We also attempt to pull column descriptions from the CENSUS_CONCEPTS /
-CENSUS_TABLES metadata tables if they exist in the share.
+Strategy:
+- INFORMATION_SCHEMA gives us the list of data tables (e.g. '2019_CBG_B01').
+- The METADATA_CBG_FIELD_DESCRIPTIONS tables tell us what each opaque column
+  (e.g. 'B01001e10') actually means in human-readable terms. That is what we
+  embed for semantic search.
+- Table names in this share start with digits (e.g. '2019_CBG_B01') so every
+  identifier must be double-quoted when used in SQL.
 """
 import logging
-from dataclasses import dataclass, field
-from typing import List, Dict
+import re
+from dataclasses import dataclass
+from typing import List, Dict, Optional
 
 from .snowflake_client import SnowflakeClient
 
 logger = logging.getLogger(__name__)
 
 
+# Known vintages in this Marketplace share
+SUPPORTED_YEARS = (2019, 2020)
+METADATA_TABLE_TEMPLATE = "{year}_METADATA_CBG_FIELD_DESCRIPTIONS"
+FIPS_TABLE_TEMPLATE = "{year}_METADATA_CBG_FIPS_CODES"
+GEO_TABLE_TEMPLATE = "{year}_METADATA_CBG_GEOGRAPHIC_DATA"
+
+
 @dataclass
-class ColumnInfo:
-    table_name: str
-    column_name: str
-    data_type: str
-    description: str = ""
+class FieldDescription:
+    """One column of a census data table, with its human-readable meaning."""
+    column_name: str       # e.g. 'B01001e10'
+    table_number: str      # e.g. 'B01001' — maps to data table '{year}_CBG_B01'
+    table_title: str       # e.g. 'Sex By Age'
+    table_topics: str      # e.g. 'Age and Sex'
+    table_universe: str    # e.g. 'Total population'
+    field_levels: List[str]
+    year: int
+
+    @property
+    def data_table_name(self) -> str:
+        """Map a field like 'B01001e10' -> data table '2019_CBG_B01'."""
+        prefix = re.match(r"^([A-Z]\d{2})", self.table_number)
+        if not prefix:
+            return f"{self.year}_CBG_{self.table_number}"
+        return f"{self.year}_CBG_{prefix.group(1)}"
+
+    @property
+    def human_label(self) -> str:
+        """E.g. 'Male > 22 to 24 years' from the non-empty field levels."""
+        return " > ".join(l for l in self.field_levels if l and l.strip())
 
     def to_document(self) -> str:
-        """Flatten to a single searchable string for embedding."""
-        parts = [f"Table: {self.table_name}", f"Column: {self.column_name}",
-                 f"Type: {self.data_type}"]
-        if self.description:
-            parts.append(f"Description: {self.description}")
-        return " | ".join(parts)
+        """Searchable text for embedding."""
+        return (
+            f"Year: {self.year} | "
+            f"Topic: {self.table_topics} | "
+            f"Table: {self.table_title} | "
+            f"Universe: {self.table_universe} | "
+            f"Meaning: {self.human_label} | "
+            f"Data table: {self.data_table_name} | "
+            f"Column: {self.column_name}"
+        )
 
 
 @dataclass
 class TableInfo:
     name: str
-    row_count: int | None = None
-    description: str = ""
-    columns: List[ColumnInfo] = field(default_factory=list)
+    row_count: Optional[int] = None
+    kind: str = "TABLE"
 
 
 class SchemaExplorer:
-    """Enumerates tables and columns, enriched with descriptions when available."""
-
     def __init__(self, client: SnowflakeClient):
         self._client = client
         self._db = client.config.database
@@ -47,7 +77,7 @@ class SchemaExplorer:
 
     def list_tables(self) -> List[TableInfo]:
         query = f"""
-            SELECT TABLE_NAME, ROW_COUNT, COMMENT
+            SELECT TABLE_NAME, ROW_COUNT, TABLE_TYPE
             FROM {self._db}.INFORMATION_SCHEMA.TABLES
             WHERE TABLE_SCHEMA = '{self._schema}'
               AND TABLE_TYPE IN ('BASE TABLE', 'VIEW')
@@ -57,51 +87,71 @@ class SchemaExplorer:
             cur.execute(query)
             rows = cur.fetchall()
         return [
-            TableInfo(
-                name=r["TABLE_NAME"],
-                row_count=r.get("ROW_COUNT"),
-                description=r.get("COMMENT") or "",
-            )
+            TableInfo(name=r["TABLE_NAME"], row_count=r.get("ROW_COUNT"),
+                      kind=r.get("TABLE_TYPE", "TABLE"))
             for r in rows
         ]
 
-    def list_columns(self, table_names: List[str] | None = None) -> List[ColumnInfo]:
-        where = f"TABLE_SCHEMA = '{self._schema}'"
-        if table_names:
-            joined = ", ".join(f"'{t}'" for t in table_names)
-            where += f" AND TABLE_NAME IN ({joined})"
-
-        query = f"""
-            SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, COMMENT
-            FROM {self._db}.INFORMATION_SCHEMA.COLUMNS
-            WHERE {where}
-            ORDER BY TABLE_NAME, ORDINAL_POSITION
-        """
+    def load_field_descriptions(self, year: int) -> List[FieldDescription]:
+        """Load all rows from the metadata field descriptions table for a given year."""
+        table = METADATA_TABLE_TEMPLATE.format(year=year)
+        # Note: table name requires double quotes (starts with digit).
+        # FIELD_LEVELl_9 has a typo in the source data — we preserve it as-is.
+        query = f'''
+            SELECT
+                TABLE_ID,
+                TABLE_NUMBER,
+                TABLE_TITLE,
+                TABLE_TOPICS,
+                TABLE_UNIVERSE,
+                FIELD_LEVEL_1, FIELD_LEVEL_2, FIELD_LEVEL_3, FIELD_LEVEL_4,
+                FIELD_LEVEL_5, FIELD_LEVEL_6, FIELD_LEVEL_7, FIELD_LEVEL_8,
+                "FIELD_LEVELl_9", FIELD_LEVEL_10
+            FROM {self._db}.{self._schema}."{table}"
+        '''
         with self._client.cursor() as cur:
             cur.execute(query)
             rows = cur.fetchall()
-        return [
-            ColumnInfo(
-                table_name=r["TABLE_NAME"],
-                column_name=r["COLUMN_NAME"],
-                data_type=r["DATA_TYPE"],
-                description=r.get("COMMENT") or "",
-            )
-            for r in rows
-        ]
 
-    def build_full_schema(self) -> List[TableInfo]:
-        """Return tables populated with their columns."""
-        tables = self.list_tables()
-        if not tables:
-            logger.warning("No tables found in %s.%s", self._db, self._schema)
+        descriptions: List[FieldDescription] = []
+        for r in rows:
+            levels = [
+                r.get("FIELD_LEVEL_1") or "", r.get("FIELD_LEVEL_2") or "",
+                r.get("FIELD_LEVEL_3") or "", r.get("FIELD_LEVEL_4") or "",
+                r.get("FIELD_LEVEL_5") or "", r.get("FIELD_LEVEL_6") or "",
+                r.get("FIELD_LEVEL_7") or "", r.get("FIELD_LEVEL_8") or "",
+                r.get("FIELD_LEVELl_9") or "", r.get("FIELD_LEVEL_10") or "",
+            ]
+            descriptions.append(FieldDescription(
+                column_name=r["TABLE_ID"],
+                table_number=r.get("TABLE_NUMBER") or "",
+                table_title=r.get("TABLE_TITLE") or "",
+                table_topics=r.get("TABLE_TOPICS") or "",
+                table_universe=r.get("TABLE_UNIVERSE") or "",
+                field_levels=levels,
+                year=year,
+            ))
+        logger.info("Loaded %d field descriptions for year %d", len(descriptions), year)
+        return descriptions
+
+    def load_all_field_descriptions(self) -> List[FieldDescription]:
+        all_fields: List[FieldDescription] = []
+        for year in SUPPORTED_YEARS:
+            try:
+                all_fields.extend(self.load_field_descriptions(year))
+            except Exception as e:
+                logger.warning("Could not load metadata for year %d: %s", year, e)
+        return all_fields
+
+    def get_fips_sample(self, year: int = 2019, limit: int = 5) -> List[Dict]:
+        """Pull a few rows from the FIPS metadata so the agent sees the
+        state/county/tract column names available for filtering."""
+        table = FIPS_TABLE_TEMPLATE.format(year=year)
+        query = f'SELECT * FROM {self._db}.{self._schema}."{table}" LIMIT {limit}'
+        try:
+            with self._client.cursor() as cur:
+                cur.execute(query)
+                return cur.fetchall()
+        except Exception as e:
+            logger.warning("Could not load FIPS sample: %s", e)
             return []
-
-        columns = self.list_columns([t.name for t in tables])
-        by_table: Dict[str, List[ColumnInfo]] = {}
-        for c in columns:
-            by_table.setdefault(c.table_name, []).append(c)
-
-        for t in tables:
-            t.columns = by_table.get(t.name, [])
-        return tables

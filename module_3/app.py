@@ -6,7 +6,16 @@ Run locally:
 Deployment: Streamlit Community Cloud. See README for setup.
 """
 import logging
+import sys
 import time
+from pathlib import Path
+
+# Make sibling modules (module_1, module_2, module_3) importable regardless of
+# how Streamlit invokes this file. Streamlit Cloud runs from the repo root but
+# does not automatically add it to sys.path.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 import streamlit as st
 

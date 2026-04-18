@@ -6,6 +6,7 @@ dependencies:
   - pip
   - pip:
       - snowflake-connector-python>=3.7.0
+      - openai>=1.40.0
       - python-dotenv>=1.0.0
       - sentence-transformers>=2.5.0
       - faiss-cpu>=1.7.4

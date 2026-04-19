@@ -20,7 +20,7 @@ CUSTOM_CSS = """
     }
 
     /* Soft animated gradient backdrop */
-    .stApp::before { d
+    .stApp::before {
         content: '';
         position: fixed;
         top: 0; left: 0; right: 0; bottom: 0;
@@ -200,6 +200,68 @@ CUSTOM_CSS = """
     [data-testid="stChatInput"] textarea {
         color: #e2e8f0 !important;
         font-family: 'Inter', sans-serif !important;
+    }
+
+    /* ---- Scalar metric (for single-value answers) ---- */
+    .scalar-metric {
+        background: linear-gradient(135deg,
+            rgba(96, 165, 250, 0.12) 0%,
+            rgba(168, 85, 247, 0.08) 100%);
+        border: 1px solid rgba(96, 165, 250, 0.25);
+        border-radius: 14px;
+        padding: 1.5rem 1.25rem;
+        margin: 0.75rem 0;
+        text-align: center;
+        animation: fadeInUp 0.4s ease-out;
+    }
+    .scalar-value {
+        font-size: 2.5rem;
+        font-weight: 700;
+        background: linear-gradient(135deg, #60a5fa 0%, #a78bfa 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+        letter-spacing: -0.02em;
+        line-height: 1.1;
+        font-family: 'JetBrains Mono', monospace;
+    }
+    .scalar-label {
+        color: #94a3b8;
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        margin-top: 0.4rem;
+        font-weight: 500;
+    }
+
+    /* ---- Visualization labels (above charts / tables) ---- */
+    .viz-label {
+        color: #94a3b8;
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        font-weight: 600;
+        margin-top: 0.9rem;
+        margin-bottom: 0.3rem;
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+    }
+
+    /* Streamlit dataframe tweaks for dark theme */
+    [data-testid="stDataFrame"] {
+        border: 1px solid rgba(148, 163, 184, 0.15) !important;
+        border-radius: 10px !important;
+        overflow: hidden;
+    }
+
+    /* Plotly chart container padding */
+    [data-testid="stPlotlyChart"] {
+        background: rgba(15, 23, 42, 0.3);
+        border: 1px solid rgba(148, 163, 184, 0.1);
+        border-radius: 10px;
+        padding: 0.5rem;
+        margin-top: 0.25rem;
     }
 
     /* ---- SQL code block ---- */

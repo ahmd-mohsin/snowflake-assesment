@@ -9,7 +9,7 @@ The JSON schemas here get passed to OpenAI as function definitions.
 import json
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from module_1 import (
     QueryExecutor, QueryResult, SchemaIndex, SUPPORTED_YEARS, UnsafeQueryError,
@@ -83,6 +83,10 @@ class ToolCallResult:
     """What we return to the LLM after a tool call."""
     content: str           # JSON-serialisable string for the 'tool' message
     numbers_seen: List[int]  # numbers extracted from results, for output guardrail
+    # For execute_sql calls: the raw rows + columns for UI rendering.
+    # None for schema searches or failed queries.
+    result_rows: Optional[List[Dict[str, Any]]] = None
+    result_columns: Optional[List[str]] = None
 
 
 class ToolRunner:
@@ -226,6 +230,8 @@ class ToolRunner:
         return ToolCallResult(
             content=json.dumps(payload, default=str),
             numbers_seen=numbers_seen,
+            result_rows=result.rows,
+            result_columns=result.columns,
         )
 
 

@@ -6,16 +6,7 @@ Run locally:
 Deployment: Streamlit Community Cloud. See README for setup.
 """
 import logging
-import sys
 import time
-from pathlib import Path
-
-# Make sibling modules (module_1, module_2, module_3) importable regardless of
-# how Streamlit invokes this file. Streamlit Cloud runs from the repo root but
-# does not automatically add it to sys.path.
-_REPO_ROOT = Path(__file__).resolve().parent.parent
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
 
 import streamlit as st
 
@@ -43,6 +34,7 @@ from module_3.session import (
     reset_conversation,
 )
 from module_3.styles import CUSTOM_CSS
+from module_3.visualizations import classify, render as render_viz
 
 logging.basicConfig(level=logging.INFO)
 # Quiet noisy libraries so Streamlit's log stream is readable
@@ -81,10 +73,13 @@ def run_turn(prompt: str):
             add_display_message(DisplayMessage(role="assistant", content=msg))
             return
 
-        # Render the answer, any warnings, and the SQL that ran
+        # Render the answer, any warnings, visualizations, and the SQL
         st.markdown(resp.answer)
         if resp.warnings:
             render_warnings(resp.warnings)
+        if resp.last_result_rows:
+            viz = classify(resp.last_result_rows, resp.last_result_columns)
+            render_viz(viz)
         if resp.last_sql:
             render_sql_block(resp.last_sql)
 
@@ -94,6 +89,8 @@ def run_turn(prompt: str):
         sql=resp.last_sql,
         warnings=resp.warnings,
         elapsed=resp.elapsed_seconds,
+        result_rows=resp.last_result_rows,
+        result_columns=resp.last_result_columns,
     ))
 
 
@@ -105,6 +102,9 @@ def render_history():
             st.markdown(msg.content)
             if msg.warnings:
                 render_warnings(msg.warnings)
+            if msg.result_rows:
+                viz = classify(msg.result_rows, msg.result_columns)
+                render_viz(viz)
             if msg.sql:
                 render_sql_block(msg.sql)
 

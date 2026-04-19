@@ -77,6 +77,8 @@ class TestAgentLoop:
         agent._tools.run = MagicMock(return_value=SimpleNamespace(
             content=json.dumps(fake_sql_result),
             numbers_seen=[39512223],
+            result_rows=[{"TOTAL": 39512223}],
+            result_columns=["TOTAL"],
         ))
         agent._llm.chat = MagicMock(side_effect=[
             fake_llm_response(tool_calls=[{
@@ -93,10 +95,48 @@ class TestAgentLoop:
         assert resp.iterations_used == 2
         assert "SELECT" in resp.last_sql
 
+    def test_result_rows_flow_through_to_response(self, agent):
+        """Verify that SQL result rows are captured and exposed on AgentResponse."""
+        fake_rows = [{"state": "CA", "pop": 39500000}, {"state": "TX", "pop": 29100000}]
+        fake_cols = ["state", "pop"]
+        agent._tools.run = MagicMock(return_value=SimpleNamespace(
+            content=json.dumps({"columns": fake_cols, "rows": fake_rows, "row_count": 2}),
+            numbers_seen=[39500000, 29100000],
+            result_rows=fake_rows,
+            result_columns=fake_cols,
+        ))
+        agent._llm.chat = MagicMock(side_effect=[
+            fake_llm_response(tool_calls=[{
+                "id": "call_1", "name": "execute_sql",
+                "args": {"sql": 'SELECT state, SUM("B01001e1") AS pop FROM "2019_CBG_B01" GROUP BY state'},
+            }]),
+            fake_llm_response(content="California has 39,500,000 people and Texas has 29,100,000."),
+        ])
+
+        conv = agent.new_conversation()
+        resp = agent.ask(conv, "population of california and texas")
+
+        assert resp.last_result_rows == fake_rows
+        assert resp.last_result_columns == fake_cols
+
     def test_max_iterations_fallback(self, agent):
         # LLM keeps requesting tools forever
         agent._tools.run = MagicMock(return_value=SimpleNamespace(
             content='{"error": "oops"}', numbers_seen=[],
+            result_rows=None, result_columns=None,
+        ))
+        agent._llm.chat = MagicMock(return_value=fake_llm_response(
+            tool_calls=[{"id": "c", "name": "execute_sql", "args": {"sql": "SELECT 1"}}],
+        ))
+
+        conv = agent.new_conversation()
+        resp = agent.ask(conv, "what is the population")
+        assert resp.iterations_used == agent._config.max_tool_iterations
+        assert "rephrasing" in resp.answer.lower()
+        # LLM keeps requesting tools forever
+        agent._tools.run = MagicMock(return_value=SimpleNamespace(
+            content='{"error": "oops"}', numbers_seen=[],
+            result_rows=None, result_columns=None,
         ))
         agent._llm.chat = MagicMock(return_value=fake_llm_response(
             tool_calls=[{"id": "c", "name": "execute_sql", "args": {"sql": "SELECT 1"}}],
@@ -113,6 +153,7 @@ class TestAgentLoop:
         ))
         agent._tools.run = MagicMock(return_value=SimpleNamespace(
             content='{}', numbers_seen=[],
+            result_rows=None, result_columns=None,
         ))
         # Patch time.time so we hit deadline immediately on iteration 2
         call_count = [0]

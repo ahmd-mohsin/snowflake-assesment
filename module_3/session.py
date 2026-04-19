@@ -23,6 +23,8 @@ class DisplayMessage:
     sql: str = ""
     warnings: List[str] = field(default_factory=list)
     elapsed: float = 0.0
+    result_rows: List[dict] = field(default_factory=list)
+    result_columns: List[str] = field(default_factory=list)
 
 
 @st.cache_resource(show_spinner="Connecting to Snowflake and loading schema...")

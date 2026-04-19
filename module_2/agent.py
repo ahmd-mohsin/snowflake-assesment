@@ -35,6 +35,9 @@ class AgentResponse:
     blocked_reason: str = ""    # set if guardrails blocked the turn
     last_sql: str = ""          # for display in the UI
     warnings: List[str] = field(default_factory=list)
+    # Last successful SQL result for UI rendering (charts, tables)
+    last_result_rows: List[dict] = field(default_factory=list)
+    last_result_columns: List[str] = field(default_factory=list)
 
 
 class DeadlineExceeded(Exception):
@@ -74,9 +77,11 @@ class Agent:
 
         # 2-4. Tool loop
         try:
-            answer, iterations, last_sql, numbers_seen = self._tool_loop(
-                conversation, deadline=start + self._config.total_deadline_seconds,
-            )
+            answer, iterations, last_sql, numbers_seen, last_rows, last_cols = \
+                self._tool_loop(
+                    conversation,
+                    deadline=start + self._config.total_deadline_seconds,
+                )
         except DeadlineExceeded:
             msg = (
                 "I couldn't finish this question within the time limit. "
@@ -106,7 +111,6 @@ class Agent:
         out_gr = check_output_grounded(answer, numbers_seen)
         if not out_gr.allowed:
             logger.warning("Output guardrail flagged answer: %s — retrying", out_gr.reason)
-            # Give the LLM one chance to fix it with an explicit instruction
             conversation.messages.append({
                 "role": "user",
                 "content": (
@@ -119,20 +123,22 @@ class Agent:
                 ),
             })
             try:
-                retry_answer, retry_iters, retry_sql, retry_nums = self._tool_loop(
-                    conversation,
-                    deadline=start + self._config.total_deadline_seconds,
-                )
+                retry_answer, retry_iters, retry_sql, retry_nums, retry_rows, retry_cols = \
+                    self._tool_loop(
+                        conversation,
+                        deadline=start + self._config.total_deadline_seconds,
+                    )
                 numbers_seen.extend(retry_nums)
-                # Re-check the retry
                 out_gr2 = check_output_grounded(retry_answer, numbers_seen)
                 if out_gr2.allowed:
                     answer = retry_answer
                     iterations += retry_iters
                     if retry_sql:
                         last_sql = retry_sql
+                    if retry_rows:
+                        last_rows = retry_rows
+                        last_cols = retry_cols
                 else:
-                    # Second attempt still flagged — return a refusal
                     answer = (
                         "I wasn't able to produce a statistically sound answer "
                         "for this question from the available data. The census "
@@ -152,7 +158,7 @@ class Agent:
         if last_sql:
             conversation.last_query = LastQueryInfo(
                 question=question, sql=last_sql,
-                row_count=0,
+                row_count=len(last_rows),
             )
 
         return AgentResponse(
@@ -161,6 +167,8 @@ class Agent:
             elapsed_seconds=time.time() - start,
             last_sql=last_sql,
             warnings=warnings,
+            last_result_rows=last_rows,
+            last_result_columns=last_cols,
         )
 
     def ask_streaming(self, conversation: Conversation,
@@ -259,12 +267,17 @@ class Agent:
     # --- internals -------------------------------------------------------
 
     def _tool_loop(self, conversation: Conversation,
-                   deadline: float) -> tuple[str, int, str, List[int]]:
-        """Non-streaming loop. Returns (answer, iterations, last_sql, numbers)."""
+                   deadline: float) -> tuple:
+        """Non-streaming loop.
+
+        Returns (answer, iterations, last_sql, numbers_seen, last_rows, last_cols).
+        """
         import json as _json
 
         iterations = 0
         last_sql = ""
+        last_rows: List[dict] = []
+        last_cols: List[str] = []
         numbers_seen: List[int] = []
 
         while iterations < self._config.max_tool_iterations:
@@ -292,16 +305,20 @@ class Agent:
                             last_sql = args.get("sql", "")
                         except Exception:
                             pass
+                        # Track the most recent successful SQL result for UI
+                        if result.result_rows is not None:
+                            last_rows = result.result_rows
+                            last_cols = result.result_columns or []
                     conversation.add_tool_result(tc.id, result.content)
                 continue
 
             answer = msg.content or "(no answer)"
             conversation.add_assistant(answer)
-            return answer, iterations, last_sql, numbers_seen
+            return answer, iterations, last_sql, numbers_seen, last_rows, last_cols
 
         fallback = (
             "I wasn't able to get a clean answer after several attempts. "
             "Could you try rephrasing the question?"
         )
         conversation.add_assistant(fallback)
-        return fallback, iterations, last_sql, numbers_seen
+        return fallback, iterations, last_sql, numbers_seen, last_rows, last_cols

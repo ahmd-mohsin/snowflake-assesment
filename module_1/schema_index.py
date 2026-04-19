@@ -1,23 +1,37 @@
 """Semantic search over census field descriptions.
 
-Builds a FAISS index over human-readable field meanings (from metadata tables),
-not raw column names. The index is cached to disk so subsequent app starts are
-fast (~1s vs ~30s on first build).
+Builds a FAISS index over human-readable field meanings (from metadata tables).
+Uses OpenAI's text-embedding-3-small to avoid the heavy torch+transformers
+dependency chain. The index is cached to disk so subsequent app starts load
+instantly.
+
+Why OpenAI over sentence-transformers?
+  - No torch / torchvision / transformers install (3GB+ saved)
+  - No Python 3.14 incompatibilities
+  - Quality is slightly better for short-text retrieval
+  - Cost is negligible: 16k fields ≈ $0.005 one-time to index
+  - Requires OPENAI_API_KEY which the agent needs anyway
 """
 import logging
 import os
 import pickle
+import time
 from dataclasses import dataclass
 from typing import List
 
 import faiss
 import numpy as np
-from sentence_transformers import SentenceTransformer
+from openai import OpenAI
 
-from .config import EMBEDDING_MODEL, SCHEMA_INDEX_PATH
+from .config import SCHEMA_INDEX_PATH
 from .schema_explorer import FieldDescription, SchemaExplorer
 
 logger = logging.getLogger(__name__)
+
+
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+EMBEDDING_DIM = 1536  # text-embedding-3-small dimension
+_BATCH_SIZE = 256     # OpenAI embeddings API batch limit is 2048; 256 is safe
 
 
 @dataclass
@@ -34,15 +48,43 @@ class SchemaIndex:
                  model_name: str = EMBEDDING_MODEL):
         self._cache_dir = cache_dir
         self._model_name = model_name
-        self._model: SentenceTransformer | None = None
+        self._client: OpenAI | None = None
         self._index: faiss.Index | None = None
         self._fields: List[FieldDescription] = []
 
-    def _load_model(self) -> SentenceTransformer:
-        if self._model is None:
-            logger.info("Loading embedding model %s", self._model_name)
-            self._model = SentenceTransformer(self._model_name)
-        return self._model
+    def _get_client(self) -> OpenAI:
+        if self._client is None:
+            api_key = os.getenv("OPENAI_API_KEY")
+            if not api_key:
+                raise RuntimeError("OPENAI_API_KEY is required for embeddings")
+            self._client = OpenAI(api_key=api_key)
+        return self._client
+
+    def _embed_batch(self, texts: List[str]) -> np.ndarray:
+        """Embed a list of texts via OpenAI's batch API."""
+        client = self._get_client()
+        resp = client.embeddings.create(
+            model=self._model_name,
+            input=texts,
+        )
+        vectors = np.asarray([d.embedding for d in resp.data], dtype="float32")
+        # Normalize for cosine similarity via inner product
+        norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+        norms = np.where(norms == 0, 1, norms)
+        return vectors / norms
+
+    def _embed_many(self, texts: List[str]) -> np.ndarray:
+        """Embed all texts in batches, concatenating results."""
+        out: List[np.ndarray] = []
+        for i in range(0, len(texts), _BATCH_SIZE):
+            chunk = texts[i:i + _BATCH_SIZE]
+            t0 = time.time()
+            out.append(self._embed_batch(chunk))
+            logger.info("Embedded batch %d/%d (%d texts) in %.1fs",
+                        i // _BATCH_SIZE + 1,
+                        (len(texts) + _BATCH_SIZE - 1) // _BATCH_SIZE,
+                        len(chunk), time.time() - t0)
+        return np.vstack(out)
 
     def build(self, explorer: SchemaExplorer, force: bool = False) -> None:
         if not force and self._cache_exists():
@@ -59,12 +101,10 @@ class SchemaIndex:
             )
 
         docs = [f.to_document() for f in self._fields]
-        model = self._load_model()
-        embeddings = model.encode(docs, show_progress_bar=True,
-                                  normalize_embeddings=True,
-                                  batch_size=64)
-        embeddings = np.asarray(embeddings, dtype="float32")
+        logger.info("Embedding %d field documents via %s", len(docs), self._model_name)
+        embeddings = self._embed_many(docs)
 
+        # Inner product on normalized vectors == cosine similarity
         self._index = faiss.IndexFlatIP(embeddings.shape[1])
         self._index.add(embeddings)
         self._save_cache()
@@ -72,14 +112,10 @@ class SchemaIndex:
 
     def search(self, query: str, top_k: int = 15,
                year: int | None = None) -> List[SchemaMatch]:
-        """Return top_k matching fields. If year is given, restrict to that vintage."""
         if self._index is None or not self._fields:
             raise RuntimeError("Index not built. Call build() first.")
-        model = self._load_model()
-        q_emb = model.encode([query], normalize_embeddings=True)
-        q_emb = np.asarray(q_emb, dtype="float32")
 
-        # Over-fetch when filtering by year so we still get top_k after filter
+        q_emb = self._embed_batch([query])
         fetch_k = top_k * 3 if year else top_k
         scores, idxs = self._index.search(q_emb, fetch_k)
 

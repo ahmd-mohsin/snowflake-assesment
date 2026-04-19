@@ -1,16 +1,11 @@
 """Configuration loaded from environment variables."""
 import os
 from dataclasses import dataclass
-from pathlib import Path
-
 from dotenv import load_dotenv
-
-# Resolve from CWD (e.g. repo root when running smoke_test.py) and beside this file (module_1/.env).
-_config_dir = Path(__file__).resolve().parent
-load_dotenv(_config_dir / ".env")
-load_dotenv(Path.cwd() / ".env", override=True)
-
-
+ 
+load_dotenv()
+ 
+ 
 @dataclass(frozen=True)
 class SnowflakeConfig:
     account: str
@@ -23,7 +18,7 @@ class SnowflakeConfig:
     schema: str = "CENSUS"
     query_timeout_seconds: int = 45  # leaves headroom below the 60s SLA
     max_rows_returned: int = 1000
-
+ 
     @classmethod
     def from_env(cls) -> "SnowflakeConfig":
         required = ["SNOWFLAKE_ACCOUNT", "SNOWFLAKE_USER", "SNOWFLAKE_PASSWORD",
@@ -31,7 +26,7 @@ class SnowflakeConfig:
         missing = [k for k in required if not os.getenv(k)]
         if missing:
             raise EnvironmentError(f"Missing required env vars: {missing}")
-
+ 
         return cls(
             account=os.environ["SNOWFLAKE_ACCOUNT"],
             user=os.environ["SNOWFLAKE_USER"],
@@ -41,8 +36,10 @@ class SnowflakeConfig:
             database=os.getenv("SNOWFLAKE_DATABASE", cls.database),
             schema=os.getenv("SNOWFLAKE_SCHEMA", cls.schema),
         )
-
-
+ 
+ 
 # Path where the schema index is cached to avoid re-embedding on every startup
 SCHEMA_INDEX_PATH = os.getenv("SCHEMA_INDEX_PATH", "./.cache/schema_index")
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+# We use OpenAI's embeddings API to avoid shipping torch/transformers.
+# Overridable via env var for testing.
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")

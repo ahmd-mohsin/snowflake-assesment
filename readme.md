@@ -4,7 +4,7 @@ A production-quality, chat-based agent that answers natural-language questions a
 
 Built as a 24-hour take-home for Snowflake's Applied AI team.
 
-**Live demo:** _<INSERT YOUR STREAMLIT URL HERE — e.g. `https://snow-assesment-muahmed.streamlit.app`>_
+**Live demo:** _<https://snow-assesment.streamlit.app/>_
 **Demo access:** no login required.
 
 ---

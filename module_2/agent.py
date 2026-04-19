@@ -102,19 +102,57 @@ class Agent:
             )
 
         warnings: List[str] = []
-        # 5. Output guardrail
+        # 5. Output guardrail — if numbers don't trace to SQL results, retry once
         out_gr = check_output_grounded(answer, numbers_seen)
         if not out_gr.allowed:
-            logger.warning("Output guardrail flagged answer: %s", out_gr.reason)
-            warnings.append(
-                "Some numbers in this answer could not be verified against the "
-                "data returned. Treat them with caution."
-            )
+            logger.warning("Output guardrail flagged answer: %s — retrying", out_gr.reason)
+            # Give the LLM one chance to fix it with an explicit instruction
+            conversation.messages.append({
+                "role": "user",
+                "content": (
+                    "Your previous answer contained numeric figures that do not "
+                    "trace to any SQL result in this conversation. Please redo "
+                    "the answer using ONLY numbers that appear in the tool "
+                    "results above, or if you cannot, say so directly and "
+                    "explain what information is missing. Do not invent or "
+                    "calculate new numbers."
+                ),
+            })
+            try:
+                retry_answer, retry_iters, retry_sql, retry_nums = self._tool_loop(
+                    conversation,
+                    deadline=start + self._config.total_deadline_seconds,
+                )
+                numbers_seen.extend(retry_nums)
+                # Re-check the retry
+                out_gr2 = check_output_grounded(retry_answer, numbers_seen)
+                if out_gr2.allowed:
+                    answer = retry_answer
+                    iterations += retry_iters
+                    if retry_sql:
+                        last_sql = retry_sql
+                else:
+                    # Second attempt still flagged — return a refusal
+                    answer = (
+                        "I wasn't able to produce a statistically sound answer "
+                        "for this question from the available data. The census "
+                        "dataset provides block-group-level measurements; some "
+                        "questions require underlying record-level data that is "
+                        "not published here. Could you rephrase or ask something "
+                        "more specific?"
+                    )
+                    warnings.append("Answer suppressed because numbers were not grounded.")
+            except DeadlineExceeded:
+                answer = (
+                    "I needed more time to produce a verified answer than I had. "
+                    "Try a narrower question."
+                )
+                warnings.append("Deadline reached during retry.")
 
         if last_sql:
             conversation.last_query = LastQueryInfo(
                 question=question, sql=last_sql,
-                row_count=0,  # not tracked here; UI can fetch separately
+                row_count=0,
             )
 
         return AgentResponse(

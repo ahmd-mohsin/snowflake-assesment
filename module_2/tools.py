@@ -164,6 +164,20 @@ class ToolRunner:
                 numbers_seen=[],
             )
 
+        # Semantic validation: block statistically meaningless aggregations
+        # (e.g. SUM of median columns) before we spend a Snowflake query.
+        from .sql_semantics import check_sql_semantics
+        sem = check_sql_semantics(sql)
+        if not sem.ok:
+            logger.info("SQL rejected by semantic check: %s", sem.reason)
+            return ToolCallResult(
+                content=json.dumps({
+                    "error": sem.reason,
+                    "suggestion": sem.suggestion,
+                }),
+                numbers_seen=[],
+            )
+
         try:
             result: QueryResult = self._executor.execute(sql)
         except UnsafeQueryError as e:
